@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# cleanup-cilium.sh
+# clean_cilium.sh
 # Best-effort script to remove Cilium from a Kubernetes cluster
 # and clean local node datapath state (CNI config, tc BPF, cilium_* interfaces).
 #
