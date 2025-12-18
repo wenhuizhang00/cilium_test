@@ -4,25 +4,23 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  rollout_cilium_tc_prio.sh <NEW_PRIO> [--prior ./prior.sh] [--dry-run] [--match REGEX] [--pin-dir DIR]
-
-Examples:
-  ./rollout_cilium_tc_prio.sh 12
-  ./rollout_cilium_tc_prio.sh 12 --dry-run
-  ./rollout_cilium_tc_prio.sh 12 --match '^(cil|cilium|bpf_lxc)'
-  ./rollout_cilium_tc_prio.sh 13 --pin-dir /sys/fs/bpf/tc-move
+  roll.sh <NEW_PRIO> [--prior ./prior.sh] [--dry-run] [--match REGEX] [--pin-dir DIR]
 
 What it does:
-  - Reads interface/hook/prog_id from prior.sh
+  - Reads iface/hook/prio/handle/prog_id from prior.sh
   - For each Cilium-owned tc bpf program:
       pins the existing BPF prog (by prog_id) into bpffs
       attaches the pinned prog at NEW_PRIO (tc pref)
       deletes the old priority instance
-  - Skips non-Cilium programs (e.g., docker programs at prio 3 on cilium_host)
 
-Why pinning:
-  - tc does NOT accept "bpf ... id <PROG_ID>" on many iproute2 versions.
-  - Using "bpf da pinned <PATH>" works reliably.
+Important fix:
+  - Always operate on "protocol all" (and chain 0) to match Cilium-created filters.
+  - Without protocol/chain, tc del/replace often won't match, leaving old prefs behind.
+
+Examples:
+  ./roll.sh 13
+  ./roll.sh 13 --dry-run
+  ./roll.sh 13 --pin-dir /sys/fs/bpf/tc-rollout
 EOF
 }
 
@@ -85,25 +83,17 @@ ensure_pin_dir() {
 }
 
 pin_path_for() {
-  local dev="$1" dir="$2" prog_id="$3" handle="$4" old_pref="$5"
-  # include dev/dir to avoid collisions if same prog_id appears in multiple places (rare, but possible)
-  echo "${PIN_DIR}/${dev}-${dir}-pref${old_pref}-h${handle}-id${prog_id}"
+  local dev="$1" dir="$2" prog_id="$3" handle="$4"
+  # stable pin name per dev/dir/handle/prog_id (not per old pref)
+  echo "${PIN_DIR}/${dev}-${dir}-h${handle}-id${prog_id}"
 }
 
 pin_prog_if_needed() {
   local prog_id="$1" pin_path="$2"
-
-  # If already pinned, keep it.
   if bpftool prog show pinned "${pin_path}" >/dev/null 2>&1; then
     return 0
   fi
-
   run "bpftool prog pin id ${prog_id} ${pin_path}"
-}
-
-tc_filter_exists_at_pref_handle() {
-  local dev="$1" dir="$2" pref="$3" handle="$4"
-  tc filter show dev "${dev}" "${dir}" 2>/dev/null | grep -qE "pref ${pref} .* handle ${handle#0x} "
 }
 
 move_filter() {
@@ -118,16 +108,16 @@ move_filter() {
   ensure_pin_dir
 
   local pin_path
-  pin_path="$(pin_path_for "${dev}" "${dir}" "${prog_id}" "${handle#0x}" "${old_pref}")"
+  pin_path="$(pin_path_for "${dev}" "${dir}" "${prog_id}" "${handle#0x}")"
 
   echo "MOVE: ${dev} ${dir} prog_id=${prog_id} handle=${handle} ${old_pref} -> ${NEW_PRIO}"
   pin_prog_if_needed "${prog_id}" "${pin_path}"
 
-  # Attach pinned prog at new priority
-  run "tc filter replace dev ${dev} ${dir} pref ${NEW_PRIO} handle ${handle} bpf da pinned ${pin_path}"
+  # IMPORTANT: match the actual Cilium filters: protocol all + chain 0
+  run "tc filter replace dev ${dev} ${dir} protocol all pref ${NEW_PRIO} chain 0 handle ${handle} bpf da pinned ${pin_path}"
 
-  # Delete old instance (best-effort)
-  run "tc filter del dev ${dev} ${dir} pref ${old_pref} handle ${handle} 2>/dev/null || true"
+  # Delete the old instance (best-effort) - include protocol/chain/bpf so it matches
+  run "tc filter del dev ${dev} ${dir} protocol all pref ${old_pref} chain 0 handle ${handle} bpf 2>/dev/null || true"
 }
 
 echo "==> Desired tc prio/pref: ${NEW_PRIO}"
@@ -139,7 +129,8 @@ echo "==> Pin dir: ${PIN_DIR}"
 echo "==> Current hooks:"
 "${PRIOR_SH}"
 
-# Parse prior.sh output:
+# Parse prior.sh output.
+# Expected columns:
 # IFACE HOOK PRIO HANDLE CHAIN PROG_ID PROG_NAME
 mapfile -t LINES < <("${PRIOR_SH}" | awk 'NR>1 && NF>=6 {print $1,$2,$3,$4,$6}')
 
@@ -182,3 +173,4 @@ done
 echo "==> Summary: targeted=${TARGETED} changed_attempted=${CHANGED} skipped=${SKIPPED}"
 echo "==> Resulting hooks:"
 "${PRIOR_SH}"
+
