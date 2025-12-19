@@ -8,7 +8,7 @@ OUT_MAP="${2:-$HOME/lxc_tc_prog_map.tsv}"   # TSV: ifindex<TAB>dir<TAB>prog_id<T
 PREF="${PREF:-1}"
 HANDLE="${HANDLE:-1}"        # you can set HANDLE=0x1 too
 IF_REGEX="${IF_REGEX:-^lxc}" # which ifnames to hook
-ONLY_IFACES="${ONLY_IFACES:-}" # space-separated list: "lxc123 lxc456"
+ONLY_IFACES="${ONLY_IFACES:-"lxcf100f88ed873"}" # space-separated list: "lxc123 lxc456"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
